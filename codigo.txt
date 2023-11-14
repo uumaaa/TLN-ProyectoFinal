@@ -1,0 +1,192 @@
+import string
+from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from gensim.models import Word2Vec
+import os
+import pandas as pd
+import numpy as np
+import numpy as np
+
+def otsu_thresholding(importancia: np.ndarray) -> float:
+    hist, _ = np.histogram(importancia, bins=400, range=(importancia[-1], importancia[0]))  # Calcular el histograma
+    salto = (importancia[0] - importancia[-1])/400
+    hist = hist / np.sum(hist)  # Normalizar el histograma para obtener probabilidades
+    max_sigma = 0
+    threshold = 0
+    0.38 / 400
+    for t in range(1, len(hist)):
+        w0 = np.sum(hist[:t])  # Probabilidad acumulada para la clase 0 -> sin importancia 
+        w1 = 1 - w0  # Probabilidad acumulada para la clase 1 -> con importancia
+        if w0 == 0 or w1 == 0:
+            continue
+
+        mu0 = np.sum(np.arange(t) * hist[:t]) / w0  # Media ponderada para la clase 0
+        mu1 = np.sum(np.arange(t, len(hist)) * hist[t:]) / w1  # Media ponderada para la clase 1
+
+        sigma = w0 * w1 * ((mu0 - mu1) ** 2)  # Calcular varianza entre clases
+
+        if sigma > max_sigma:
+            max_sigma = sigma
+            threshold = t
+    return threshold * salto
+
+def leer_archivos(carpeta: str) -> list[str]:
+    cuerpo = []
+    archivos_txt = [archivo for archivo in os.listdir(carpeta) if archivo.endswith('.txt')]
+    for archivo in archivos_txt:
+        ruta_completa = os.path.join(carpeta, archivo)
+        with open(ruta_completa, 'r', encoding="utf-8") as file:
+            contenido = file.read()
+            cuerpo.append(contenido)
+    return cuerpo
+
+def normalizar_documento(texto: str) -> (str, list[str], list[str]):
+    stopwords_es = set(stopwords.words('spanish'))
+    signos_puntuacion = string.punctuation + '¡¿'
+    # Eliminar signos de puntuación
+    oraciones = texto.split(".")[:-1]
+    oraciones_normalizadas = []
+    oraciones_stop = []
+    texto_normalizado = ""
+    for oracion in oraciones:
+        texto_sin_puntuacion = ''.join([caracter for caracter in oracion if caracter not in signos_puntuacion])
+        # Tokenizar el texto en palabras
+        palabras = word_tokenize(texto_sin_puntuacion, language='spanish')
+        palabras = [palabra.lower() for palabra in palabras]
+        # Eliminar stopwords
+        palabras_sin_stopwords = [palabra for palabra in palabras if palabra not in stopwords_es]
+        oraciones_stop.append(' '.join(palabras))
+        oraciones_normalizadas.append(' '.join(palabras_sin_stopwords))
+        texto_normalizado = texto_normalizado + ' '.join(palabras_sin_stopwords)
+    return texto_normalizado, oraciones_normalizadas, oraciones_stop
+
+def normalizar_cuerpo(cuerpo: list[str]) -> list[str]:
+    cuerpo_normalizado = []
+    oraciones_normalizadas = []
+    oraciones_stop = []
+    for documento in cuerpo:
+        c_norm, oraciones_cuerpo, oraciones_cuerpo_stop = normalizar_documento(documento)
+        cuerpo_normalizado.append(c_norm)
+        oraciones_normalizadas.append(oraciones_cuerpo)
+        oraciones_stop.append(oraciones_cuerpo_stop)
+    return cuerpo_normalizado, oraciones_normalizadas, oraciones_stop
+
+def calcular_tfidf_cuerpo(cuerpo: list[str]) -> pd.DataFrame:
+    vectorizador_tfidf = TfidfVectorizer()
+    matriz_tfidf = vectorizador_tfidf.fit_transform(cuerpo)
+    # [pal tf idf]
+    dataframes = []
+    for doc_idx, documento in enumerate(cuerpo):
+        data = []
+        palabras_doc = documento.split() #tokenizacion
+        for palabra in palabras_doc:
+            index_palabra = vectorizador_tfidf.vocabulary_.get(palabra)
+            valor_idf = vectorizador_tfidf.idf_[index_palabra]
+            valor_tfidf = matriz_tfidf[:, index_palabra].toarray().flatten()[doc_idx]
+            valor_tf = valor_tfidf / valor_idf
+            #tfidf = tf * idf
+            data.append([
+                palabra,
+                doc_idx + 1,
+                valor_tf,
+                valor_idf,
+                valor_tfidf
+            ])
+        dataframes.append(pd.DataFrame(data, columns=["palabra", "documento", "TF", "IDF", "TFIDF"]))
+    return dataframes
+
+def obtener_mejores_puestos(df_documento: pd.DataFrame, columna: str, cantidad: int = 10, tipo: str = "cantidad") -> pd.DataFrame:
+    if tipo == "cantidad":
+        return df_documento.sort_values(by=columna, ascending=False).head(cantidad)
+    else:
+        cuerpo_ordenado = df_documento.sort_values(by=columna, ascending=False)
+        t = otsu_thresholding(cuerpo_ordenado[columna].to_numpy())
+        return cuerpo_ordenado[cuerpo_ordenado[columna] >= t]
+
+def similitud_oraciones_embeddings(cuerpo_oracion:list[list[str]]): 
+    cuerpo_oracion_ranked = []
+    orden_og = []
+    for oraciones in cuerpo_oracion:
+        word_embeddings_model = Word2Vec(oraciones, vector_size=100, window=5, min_count=1, sg=0)
+        # Calcular los embeddings de las oraciones
+        sentence_embeddings = []
+        for oracion in oraciones:
+            palabras = oracion.split()
+            embedding_oracion = np.mean([word_embeddings_model.wv[palabra] for palabra in palabras if palabra in word_embeddings_model.wv] or [np.zeros(100)], axis=0)
+            sentence_embeddings.append(embedding_oracion)
+        # Calcula la similitud entre oraciones
+        similarity_matrix = np.zeros([len(oraciones), len(oraciones)])
+        for i in range(len(oraciones)):
+            for j in range(len(oraciones)):
+                if i == j:
+                    similarity_matrix[i][j] = 0
+                elif (np.linalg.norm(sentence_embeddings[i]) * np.linalg.norm(sentence_embeddings[j])) == 0:
+                    similarity_matrix[i][j] = 0
+                else:
+                    similarity_matrix[i][j] = np.dot(sentence_embeddings[i], sentence_embeddings[j]) / (np.linalg.norm(sentence_embeddings[i]) * np.linalg.norm(sentence_embeddings[j]))
+        ranking_oraciones = np.argsort(np.sum(similarity_matrix, axis=1))[::-1]
+        cuerpo_oracion_ranked.append([oraciones[idx] for idx in ranking_oraciones])
+        orden_og.append(ranking_oraciones)
+    return cuerpo_oracion_ranked, orden_og
+
+def generar_resumen_documento(df_documento: pd.DataFrame, oraciones_cuerpo_ranked: list[str], orden_oraciones: list[int], oraciones_og: list[str], longitud: int = 5) -> list[str]:
+    cantidad_oraciones = len(oraciones_cuerpo_ranked)
+    mejores_puestos = obtener_mejores_puestos(df_documento, "TFIDF", tipo="otsu")
+    palabras = mejores_puestos["palabra"].to_numpy()
+    oraciones_tfidf = np.zeros((cantidad_oraciones))
+    for idx, oracion in enumerate(oraciones_cuerpo_ranked):
+        palabras_oracion = oracion.split()
+        for palabra in palabras_oracion:
+            if palabra in palabras:
+                oraciones_tfidf[idx] += 1
+    oraciones_redundates = oraciones_tfidf[:cantidad_oraciones * 2 // 3]
+    oraciones_extra = oraciones_tfidf[cantidad_oraciones * 2 // 3:]
+    oraciones_redundates_sort = np.argsort(oraciones_redundates)[::-1]
+    oraciones_extra_sort = np.argsort(oraciones_extra)[::-1]
+    resumen = []
+    print(oraciones_redundates_sort)
+    for i in range(longitud - 1):
+        indice_oracion = oraciones_redundates_sort[i]
+        indice_oracion_inicial = orden_oraciones[indice_oracion]
+        resumen.append(oraciones_og[indice_oracion_inicial])
+    for i in range(1):
+        indice_oracion = oraciones_extra_sort[i] + cantidad_oraciones * 2 // 3
+        indice_oracion_inicial = orden_oraciones[indice_oracion]
+        resumen.append(oraciones_og[indice_oracion_inicial])
+    return resumen
+
+def generar_resumen_cuerpo(resumenes_documentos, longitud=5):
+    oraciones_importantes = []
+    for oraciones_doc in resumenes_documentos:
+        oraciones_importantes.append(oraciones_doc[0])
+        oraciones_importantes.append(oraciones_doc[1])
+    word_embeddings_model = Word2Vec(oraciones_importantes, vector_size=100, window=5, min_count=1, sg=0)
+    sentence_embeddings = []
+    for oracion in oraciones_importantes:
+        palabras = oracion.split()
+        embedding_oracion = np.mean([word_embeddings_model.wv[palabra] for palabra in palabras if palabra in word_embeddings_model.wv] or [np.zeros(100)], axis=0)
+        sentence_embeddings.append(embedding_oracion)
+        # Calcula la similitud entre oraciones
+    similarity_matrix = np.zeros([len(oraciones_importantes), len(oraciones_importantes)])
+    for i in range(len(oraciones_importantes)):
+        for j in range(len(oraciones_importantes)):
+            if i == j:
+                similarity_matrix[i][j] = 0
+            elif (np.linalg.norm(sentence_embeddings[i]) * np.linalg.norm(sentence_embeddings[j])) == 0:
+                similarity_matrix[i][j] = 0
+            else:
+                similarity_matrix[i][j] = np.dot(sentence_embeddings[i], sentence_embeddings[j]) / (np.linalg.norm(sentence_embeddings[i]) * np.linalg.norm(sentence_embeddings[j]))
+    ranking_oraciones = np.argsort(np.sum(similarity_matrix, axis=1))[::-1][:longitud]
+    return [oraciones_importantes[idx] for idx in ranking_oraciones]
+
+cuerpo = leer_archivos("documentos")
+cuerpo,oraciones_cuerpo,oraciones_stop = normalizar_cuerpo(cuerpo)
+# [doc1,doc2,doc3] [[d11,d12,d1n],[d21,d22,d2n]] []
+df_cuerpo = calcular_tfidf_cuerpo(cuerpo)
+oraciones_cuerpo_ranked,orden_oraciones = similitud_oraciones_embeddings(oraciones_cuerpo)
+resumenesIndividuales = []
+for idx in range(len(cuerpo)):
+    resumenesIndividuales.append(generar_resumen_documento(df_cuerpo[idx],oraciones_cuerpo_ranked[idx],orden_oraciones[idx],oraciones_stop[idx],longitud=3))
+generar_resumen_cuerpo(resumenesIndividuales)
+df_cuerpo[0]
